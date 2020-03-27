@@ -1,7 +1,6 @@
 using ARMeilleure.CodeGen.RegisterAllocators;
 using ARMeilleure.Common;
 using ARMeilleure.IntermediateRepresentation;
-using ARMeilleure.Translation.PTC;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -10,11 +9,11 @@ namespace ARMeilleure.CodeGen.X86
 {
     class CodeGenContext
     {
+        private const int ReservedBytesForJump = 1;
+
         private Stream _stream;
 
-        private PtcInfo _ptcInfo;
-
-        //public int StreamOffset => (int)_stream.Length;
+        public int StreamOffset => (int)_stream.Length;
 
         public AllocationResult AllocResult { get; }
 
@@ -39,7 +38,7 @@ namespace ARMeilleure.CodeGen.X86
 
             public long RelativeOffset { get; set; }
 
-            public int InstSize { get; }
+            public int InstSize { get; set; }
 
             public Jump(BasicBlock target, long jumpPosition)
             {
@@ -50,7 +49,7 @@ namespace ARMeilleure.CodeGen.X86
 
                 RelativeOffset = 0;
 
-                InstSize = 5;
+                InstSize = 0;
             }
 
             public Jump(X86Condition condition, BasicBlock target, long jumpPosition)
@@ -62,7 +61,7 @@ namespace ARMeilleure.CodeGen.X86
 
                 RelativeOffset = 0;
 
-                InstSize = 6;
+                InstSize = 0;
             }
         }
 
@@ -73,13 +72,13 @@ namespace ARMeilleure.CodeGen.X86
         private long _jNearPosition;
         private int  _jNearLength;
 
-        public CodeGenContext(Stream stream, AllocationResult allocResult, int maxCallArgs, int blocksCount, PtcInfo ptcInfo = null)
+        public CodeGenContext(Stream stream, AllocationResult allocResult, int maxCallArgs, int blocksCount)
         {
             _stream = stream;
 
             AllocResult = allocResult;
 
-            Assembler = new Assembler(stream, ptcInfo);
+            Assembler = new Assembler(stream);
 
             CallArgsRegionSize = GetCallArgsRegionSize(allocResult, maxCallArgs, out int xmmSaveRegionSize);
             XmmSaveRegionSize  = xmmSaveRegionSize;
@@ -87,8 +86,6 @@ namespace ARMeilleure.CodeGen.X86
             _blockOffsets = new long[blocksCount];
 
             _jumps = new List<Jump>();
-
-            _ptcInfo = ptcInfo;
         }
 
         private int GetCallArgsRegionSize(AllocationResult allocResult, int maxCallArgs, out int xmmSaveRegionSize)
@@ -139,20 +136,16 @@ namespace ARMeilleure.CodeGen.X86
 
         public void JumpTo(BasicBlock target)
         {
-            Jump jump = new Jump(target, _stream.Position);
+            _jumps.Add(new Jump(target, _stream.Position));
 
-            _jumps.Add(jump);
-
-            WritePadding(jump.InstSize);
+            WritePadding(ReservedBytesForJump);
         }
 
         public void JumpTo(X86Condition condition, BasicBlock target)
         {
-            Jump jump = new Jump(condition, target, _stream.Position);
+            _jumps.Add(new Jump(condition, target, _stream.Position));
 
-            _jumps.Add(jump);
-
-            WritePadding(jump.InstSize);
+            WritePadding(ReservedBytesForJump);
         }
 
         public void JumpToNear(X86Condition condition)
@@ -204,7 +197,58 @@ namespace ARMeilleure.CodeGen.X86
 
                     long offset = jumpTarget - jump.JumpPosition;
 
-                    offset -= jump.InstSize;
+                    if (offset < 0)
+                    {
+                        for (int index2 = index - 1; index2 >= 0; index2--)
+                        {
+                            Jump jump2 = _jumps[index2];
+
+                            if (jump2.JumpPosition < jumpTarget)
+                            {
+                                break;
+                            }
+
+                            offset -= jump2.InstSize - ReservedBytesForJump;
+                        }
+                    }
+                    else
+                    {
+                        for (int index2 = index + 1; index2 < _jumps.Count; index2++)
+                        {
+                            Jump jump2 = _jumps[index2];
+
+                            if (jump2.JumpPosition >= jumpTarget)
+                            {
+                                break;
+                            }
+
+                            offset += jump2.InstSize - ReservedBytesForJump;
+                        }
+
+                        offset -= ReservedBytesForJump;
+                    }
+
+                    if (jump.IsConditional)
+                    {
+                        jump.InstSize = Assembler.GetJccLength(offset);
+                    }
+                    else
+                    {
+                        jump.InstSize = Assembler.GetJmpLength(offset);
+                    }
+
+                    // The jump is relative to the next instruction, not the current one.
+                    // Since we didn't know the next instruction address when calculating
+                    // the offset (as the size of the current jump instruction was not know),
+                    // we now need to compensate the offset with the jump instruction size.
+                    // It's also worth to note that:
+                    // - This is only needed for backward jumps.
+                    // - The GetJmpLength and GetJccLength also compensates the offset
+                    // internally when computing the jump instruction size.
+                    if (offset < 0)
+                    {
+                        offset -= jump.InstSize;
+                    }
 
                     if (jump.RelativeOffset != offset)
                     {
@@ -218,7 +262,7 @@ namespace ARMeilleure.CodeGen.X86
             }
             while (modified);
 
-            // Write the code into a new stream.
+            // Write the code, ignoring the dummy bytes after jumps, into a new stream.
             _stream.Seek(0, SeekOrigin.Begin);
 
             using (MemoryStream codeStream = new MemoryStream())
@@ -234,7 +278,7 @@ namespace ARMeilleure.CodeGen.X86
                     buffer = new byte[jump.JumpPosition - _stream.Position];
 
                     _stream.Read(buffer, 0, buffer.Length);
-                    _stream.Seek(jump.InstSize, SeekOrigin.Current);
+                    _stream.Seek(ReservedBytesForJump, SeekOrigin.Current);
 
                     codeStream.Write(buffer);
 
@@ -253,14 +297,6 @@ namespace ARMeilleure.CodeGen.X86
                 _stream.Read(buffer, 0, buffer.Length);
 
                 codeStream.Write(buffer);
-
-                if (_ptcInfo != null)
-                {
-                    if ((int)codeStream.Length >= Ptc.MinCodeLengthToSave)
-                    {
-                        _ptcInfo.WriteCode(codeStream);
-                    }
-                }
 
                 return codeStream.ToArray();
             }

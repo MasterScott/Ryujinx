@@ -7,30 +7,18 @@ using System.Runtime.InteropServices;
 
 namespace ARMeilleure.Translation
 {
-    using PTC;
-
     static class Compiler
     {
-        public static T Compile<T>(
-            ControlFlowGraph cfg,
-            OperandType[]    argTypes,
-            OperandType      retType,
-            CompilerOptions  options,
-            PtcInfo          ptcInfo = null)
+        public static T Compile<T>(ControlFlowGraph cfg, OperandType[] argTypes, OperandType retType, CompilerOptions options)
         {
-            CompiledFunction func = CompileAndGetCf(cfg, argTypes, retType, options, ptcInfo);
+            CompiledFunction func = CompileAndGetCf(cfg, argTypes, retType, options);
 
             IntPtr codePtr = JitCache.Map(func);
 
             return Marshal.GetDelegateForFunctionPointer<T>(codePtr);
         }
 
-        public static CompiledFunction CompileAndGetCf(
-            ControlFlowGraph cfg,
-            OperandType[]    argTypes,
-            OperandType      retType,
-            CompilerOptions  options,
-            PtcInfo          ptcInfo = null)
+        public static CompiledFunction CompileAndGetCf(ControlFlowGraph cfg, OperandType[] argTypes, OperandType retType, CompilerOptions options)
         {
             Logger.StartPass(PassName.Dominance);
 
@@ -54,7 +42,7 @@ namespace ARMeilleure.Translation
 
             CompilerContext cctx = new CompilerContext(cfg, argTypes, retType, options);
 
-            return CodeGenerator.Generate(cctx, ptcInfo);
+            return CodeGenerator.Generate(cctx);
         }
     }
 }

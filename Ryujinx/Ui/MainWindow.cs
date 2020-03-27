@@ -1,4 +1,3 @@
-using ARMeilleure.Translation.PTC;
 using Gtk;
 using JsonPrettyPrinterPlus;
 using LibHac.Common;
@@ -17,8 +16,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Utf8Json;
+using Utf8Json.Resolvers;
 
 using GUI = Gtk.Builder.ObjectAttribute;
 
@@ -430,9 +432,6 @@ namespace Ryujinx.Ui
 
             _gLWidget.Start();
 
-            Ptc.Stop();
-            PtcProfiler.Stop();
-
             device.Dispose();
             _deviceExitStatus.Set();
 
@@ -555,10 +554,6 @@ namespace Ryujinx.Ui
             Profile.FinishProfiling();
             DiscordIntegrationModule.Exit();
             Logger.Shutdown();
-
-            Ptc.Dispose();
-            PtcProfiler.Dispose();
-
             Application.Quit();
         }
 
