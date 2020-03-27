@@ -5,7 +5,7 @@ namespace ARMeilleure.State
 {
     public class ExecutionContext
     {
-        private const int MinCountForCheck = 4000;
+        private const int MinCountForCheck = 16000;
 
         private NativeContext _nativeContext;
 

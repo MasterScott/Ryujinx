@@ -27,7 +27,7 @@ namespace Ryujinx.Graphics.Gpu.Engine
             switch (mode)
             {
                 case ReportMode.Release: ReleaseSemaphore(state);    break;
-                case ReportMode.Counter: ReportCounter(state, type); break;
+               // case ReportMode.Counter: ReportCounter(state, type); break;
             }
         }
 
