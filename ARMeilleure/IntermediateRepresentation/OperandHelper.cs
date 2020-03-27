@@ -1,5 +1,5 @@
-using ARMeilleure.Common;
 
+using ARMeilleure.Common;
 namespace ARMeilleure.IntermediateRepresentation
 {
     static class OperandHelper
@@ -34,9 +34,9 @@ namespace ARMeilleure.IntermediateRepresentation
             return Operand().With(value);
         }
 
-        public static Operand Const(long value)
+        public static Operand Const(long value, bool disableCF = false, int? index = null)
         {
-            return Operand().With(value);
+            return new Operand(value, disableCF, index);
         }
 
         public static Operand Const(ulong value)
