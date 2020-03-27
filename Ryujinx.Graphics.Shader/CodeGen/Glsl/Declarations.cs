@@ -15,11 +15,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
 
         public static void Declare(CodeGenContext context, StructuredProgramInfo info)
         {
-            context.AppendLine("#version 420 core");
+            context.AppendLine("#version 430 core");
             context.AppendLine("#extension GL_ARB_gpu_shader_int64 : enable");
             context.AppendLine("#extension GL_ARB_shader_ballot : enable");
             context.AppendLine("#extension GL_ARB_shader_group_vote : enable");
-            context.AppendLine("#extension GL_ARB_shader_storage_buffer_object : enable");
 
             if (context.Config.Stage == ShaderStage.Compute)
             {
@@ -254,7 +253,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
         {
             Dictionary<string, AstTextureOperation> samplers = new Dictionary<string, AstTextureOperation>();
 
-            foreach (AstTextureOperation texOp in info.Samplers.OrderBy(x => x.Handle))
+            // Texture instructions other than TextureSample (like TextureSize)
+            // may have incomplete sampler type information. In those cases,
+            // we prefer instead the more accurate information from the
+            // TextureSample instruction, if both are available.
+            foreach (AstTextureOperation texOp in info.Samplers.OrderBy(x => x.Handle * 2 + (x.Inst == Instruction.TextureSample ? 0 : 1)))
             {
                 string indexExpr = NumberFormatter.FormatInt(texOp.ArraySize);
 

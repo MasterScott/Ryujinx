@@ -8,7 +8,7 @@ using Ryujinx.HLE.FileSystem.Content;
 using Ryujinx.HLE.HOS;
 using Ryujinx.HLE.HOS.Services;
 using Ryujinx.HLE.HOS.SystemState;
-using Ryujinx.HLE.Input;
+using Ryujinx.HLE.HOS.Services.Hid;
 using System;
 using System.Threading;
 
@@ -31,10 +31,6 @@ namespace Ryujinx.HLE
         public Hid Hid { get; private set; }
 
         public bool EnableDeviceVsync { get; set; } = true;
-
-        public AutoResetEvent VsyncEvent { get; private set; }
-
-        public event EventHandler Finish;
 
         public Switch(VirtualFileSystem fileSystem, ContentManager contentManager, IRenderer renderer, IAalOutput audioOut)
         {
@@ -61,13 +57,15 @@ namespace Ryujinx.HLE
             Statistics = new PerformanceStatistics();
 
             Hid = new Hid(this, System.HidBaseAddress);
+            Hid.InitDevices();
 
-            VsyncEvent = new AutoResetEvent(true);
         }
 
         public void Initialize()
         {
             System.State.SetLanguage((SystemLanguage)ConfigurationState.Instance.System.Language.Value);
+
+            System.State.SetRegion((SystemRegion)ConfigurationState.Instance.System.Region.Value);
 
             EnableDeviceVsync = ConfigurationState.Instance.Graphics.EnableVsync;
 
@@ -155,7 +153,6 @@ namespace Ryujinx.HLE
             if (disposing)
             {
                 System.Dispose();
-                VsyncEvent.Dispose();
                 AudioOut.Dispose();
             }
         }

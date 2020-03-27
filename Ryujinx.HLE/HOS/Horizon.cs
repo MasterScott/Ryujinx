@@ -7,6 +7,7 @@ using LibHac.FsSystem.NcaUtils;
 using LibHac.Ncm;
 using LibHac.Ns;
 using LibHac.Spl;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.HLE.FileSystem.Content;
 using Ryujinx.HLE.HOS.Font;
@@ -15,9 +16,11 @@ using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.HLE.HOS.Services.Mii;
+using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl;
 using Ryujinx.HLE.HOS.Services.Pcv.Bpc;
 using Ryujinx.HLE.HOS.Services.Settings;
 using Ryujinx.HLE.HOS.Services.Sm;
+using Ryujinx.HLE.HOS.Services.SurfaceFlinger;
 using Ryujinx.HLE.HOS.Services.Time.Clock;
 using Ryujinx.HLE.HOS.SystemState;
 using Ryujinx.HLE.Loaders.Executables;
@@ -30,11 +33,14 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using Utf8Json;
+using Utf8Json.Resolvers;
 
 using TimeServiceManager = Ryujinx.HLE.HOS.Services.Time.TimeManager;
 using NxStaticObject     = Ryujinx.HLE.Loaders.Executables.NxStaticObject;
 
 using static LibHac.Fs.ApplicationSaveDataManagement;
+
 
 namespace Ryujinx.HLE.HOS
 {
@@ -58,6 +64,8 @@ namespace Ryujinx.HLE.HOS
         internal long PrivilegedProcessHighestId { get; set; } = 8;
 
         internal Switch Device { get; private set; }
+
+        internal SurfaceFlinger SurfaceFlinger { get; private set; }
 
         public SystemStateMgr State { get; private set; }
 
@@ -122,6 +130,8 @@ namespace Ryujinx.HLE.HOS
         public int GlobalAccessLogMode { get; set; }
 
         internal long HidBaseAddress { get; private set; }
+
+        internal NvHostSyncpt HostSyncpoint { get; private set; }
 
         public Horizon(Switch device, ContentManager contentManager)
         {
@@ -235,6 +245,10 @@ namespace Ryujinx.HLE.HOS
             TimeServiceManager.Instance.SetupEphemeralNetworkSystemClock();
 
             DatabaseImpl.Instance.InitializeDatabase(device);
+
+            HostSyncpoint = new NvHostSyncpt(device);
+
+            SurfaceFlinger = new SurfaceFlinger(device);
         }
 
         public void LoadCart(string exeFsDir, string romFsFile = null)
@@ -292,7 +306,7 @@ namespace Ryujinx.HLE.HOS
 
             foreach (DirectoryEntryEx ticketEntry in securePartition.EnumerateEntries("/", "*.tik"))
             {
-                Result result = securePartition.OpenFile(out IFile ticketFile, ticketEntry.FullPath, OpenMode.Read);
+                Result result = securePartition.OpenFile(out IFile ticketFile, ticketEntry.FullPath.ToU8Span(), OpenMode.Read);
 
                 if (result.IsSuccess())
                 {
@@ -304,7 +318,7 @@ namespace Ryujinx.HLE.HOS
 
             foreach (DirectoryEntryEx fileEntry in securePartition.EnumerateEntries("/", "*.nca"))
             {
-                Result result = securePartition.OpenFile(out IFile ncaFile, fileEntry.FullPath, OpenMode.Read);
+                Result result = securePartition.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read);
                 if (result.IsFailure())
                 {
                     continue;
@@ -352,7 +366,7 @@ namespace Ryujinx.HLE.HOS
         {
             IFileSystem controlFs = controlNca.OpenFileSystem(NcaSectionType.Data, FsIntegrityCheckLevel);
 
-            Result result = controlFs.OpenFile(out IFile controlFile, "/control.nacp", OpenMode.Read);
+            Result result = controlFs.OpenFile(out IFile controlFile, "/control.nacp".ToU8Span(), OpenMode.Read);
 
             if (result.IsSuccess())
             {
@@ -393,7 +407,7 @@ namespace Ryujinx.HLE.HOS
 
             foreach (DirectoryEntryEx ticketEntry in nsp.EnumerateEntries("/", "*.tik"))
             {
-                Result result = nsp.OpenFile(out IFile ticketFile, ticketEntry.FullPath, OpenMode.Read);
+                Result result = nsp.OpenFile(out IFile ticketFile, ticketEntry.FullPath.ToU8Span(), OpenMode.Read);
 
                 if (result.IsSuccess())
                 {
@@ -409,7 +423,7 @@ namespace Ryujinx.HLE.HOS
 
             foreach (DirectoryEntryEx fileEntry in nsp.EnumerateEntries("/", "*.nca"))
             {
-                nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath, OpenMode.Read).ThrowIfFailure();
+                nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                 Nca nca = new Nca(KeySet, ncaFile.AsStorage());
 
@@ -454,6 +468,54 @@ namespace Ryujinx.HLE.HOS
 
             IStorage    dataStorage = null;
             IFileSystem codeFs      = null;
+
+            try
+            {
+                using (Stream stream = File.OpenRead(Path.Combine(Device.FileSystem.GetBasePath(), "games", mainNca.Header.TitleId.ToString("x16"), "updates.json")))
+                {
+                    IJsonFormatterResolver resolver = CompositeResolver.Create(StandardResolver.AllowPrivateSnakeCase);
+
+                    string updatePath = JsonSerializer.Deserialize<TitleUpdateMetadata>(stream, resolver).Selected;
+
+                    if (File.Exists(updatePath))
+                    {
+                        FileStream file         = new FileStream(updatePath, FileMode.Open, FileAccess.Read);
+                        PartitionFileSystem nsp = new PartitionFileSystem(file.AsStorage());
+
+                        foreach (DirectoryEntryEx ticketEntry in nsp.EnumerateEntries("/", "*.tik"))
+                        {
+                            Result result = nsp.OpenFile(out IFile ticketFile, ticketEntry.FullPath.ToU8Span(), OpenMode.Read);
+
+                            if (result.IsSuccess())
+                            {
+                                Ticket ticket = new Ticket(ticketFile.AsStream());
+
+                                KeySet.ExternalKeySet.Add(new RightsId(ticket.RightsId), new AccessKey(ticket.GetTitleKey(KeySet)));
+                            }
+                        }
+
+                        foreach (DirectoryEntryEx fileEntry in nsp.EnumerateEntries("/", "*.nca"))
+                        {
+                            nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+
+                            Nca nca = new Nca(KeySet, ncaFile.AsStorage());
+
+                            if (nca.Header.ContentType == NcaContentType.Program)
+                            {
+                                patchNca = nca;
+                            }
+                            else if (nca.Header.ContentType == NcaContentType.Control)
+                            {
+                                controlNca = nca;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.PrintError(LogClass.Loader, exception.ToString());
+            }
 
             if (patchNca == null)
             {
@@ -517,7 +579,7 @@ namespace Ryujinx.HLE.HOS
 
         private void LoadExeFs(IFileSystem codeFs, out Npdm metaData)
         {
-            Result result = codeFs.OpenFile(out IFile npdmFile, "/main.npdm", OpenMode.Read);
+            Result result = codeFs.OpenFile(out IFile npdmFile, "/main.npdm".ToU8Span(), OpenMode.Read);
 
             if (ResultFs.PathNotFound.Includes(result))
             {
@@ -543,7 +605,7 @@ namespace Ryujinx.HLE.HOS
 
                     Logger.PrintInfo(LogClass.Loader, $"Loading {file.Name}...");
 
-                    codeFs.OpenFile(out IFile nsoFile, file.FullPath, OpenMode.Read).ThrowIfFailure();
+                    codeFs.OpenFile(out IFile nsoFile, file.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                     NxStaticObject staticObject = new NxStaticObject(nsoFile.AsStream());
 
@@ -757,6 +819,8 @@ namespace Ryujinx.HLE.HOS
             {
                 _isDisposed = true;
 
+                SurfaceFlinger.Dispose();
+
                 KProcess terminationProcess = new KProcess(this);
 
                 KThread terminationThread = new KThread(this);
@@ -779,12 +843,6 @@ namespace Ryujinx.HLE.HOS
                 });
 
                 terminationThread.Start();
-
-                // Signal the vsync event to avoid issues of KThread waiting on it.
-                if (Device.EnableDeviceVsync)
-                {
-                    Device.VsyncEvent.Set();
-                }
 
                 // This is needed as the IPC Dummy KThread is also counted in the ThreadCounter.
                 ThreadCounter.Signal();

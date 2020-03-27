@@ -1,5 +1,7 @@
 using Gtk;
 using JsonPrettyPrinterPlus;
+using LibHac.Common;
+using LibHac.Ns;
 using Ryujinx.Audio;
 using Ryujinx.Common.Logging;
 using Ryujinx.Configuration;
@@ -8,7 +10,9 @@ using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.OpenGL;
 using Ryujinx.HLE.FileSystem;
 using Ryujinx.HLE.FileSystem.Content;
+using Ryujinx.HLE.HOS.Services.Hid;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -71,6 +75,7 @@ namespace Ryujinx.Ui
         [GUI] TreeView       _gameTable;
         [GUI] ScrolledWindow _gameTableWindow;
         [GUI] TreeSelection  _gameTableSelection;
+        [GUI] Label          _gpuName;
         [GUI] Label          _progressLabel;
         [GUI] Label          _firmwareVersionLabel;
         [GUI] LevelBar       _progressBar;
@@ -155,7 +160,8 @@ namespace Ryujinx.Ui
                 typeof(string),
                 typeof(string),
                 typeof(string),
-                typeof(string));
+                typeof(string),
+                typeof(BlitStruct<ApplicationControlProperty>));
 
             _tableStore.SetSortFunc(5, TimePlayedSort);
             _tableStore.SetSortFunc(6, LastPlayedSort);
@@ -396,7 +402,19 @@ namespace Ryujinx.Ui
 
         private void CreateGameWindow(HLE.Switch device)
         {
-            device.Hid.InitializePrimaryController(ConfigurationState.Instance.Hid.ControllerType);
+            ControllerType type = (Ryujinx.Configuration.Hid.ControllerType)ConfigurationState.Instance.Hid.ControllerType switch {
+                Ryujinx.Configuration.Hid.ControllerType.ProController => ControllerType.ProController,
+                Ryujinx.Configuration.Hid.ControllerType.Handheld => ControllerType.Handheld,
+                Ryujinx.Configuration.Hid.ControllerType.NpadPair => ControllerType.JoyconPair,
+                Ryujinx.Configuration.Hid.ControllerType.NpadLeft => ControllerType.JoyconLeft,
+                Ryujinx.Configuration.Hid.ControllerType.NpadRight => ControllerType.JoyconRight,
+                _ => ControllerType.Handheld
+            };
+            
+            device.Hid.Npads.AddControllers(new ControllerConfig {
+                PlayerId = HidControllerID.Player1,
+                Type = type
+            });
 
             _gLWidget = new GLRenderer(_emulationContext);
 
@@ -579,7 +597,8 @@ namespace Ryujinx.Ui
                     args.AppData.LastPlayed,
                     args.AppData.FileExtension,
                     args.AppData.FileSize,
-                    args.AppData.Path);
+                    args.AppData.Path,
+                    args.AppData.ControlHolder);
             });
         }
 
@@ -605,6 +624,7 @@ namespace Ryujinx.Ui
             {
                 _hostStatus.Text = args.HostStatus;
                 _gameStatus.Text = args.GameStatus;
+                _gpuName.Text    = args.GpuName;
 
                 if (args.VSyncEnabled)
                 {
@@ -651,7 +671,9 @@ namespace Ryujinx.Ui
 
             if (treeIter.UserData == IntPtr.Zero) return;
 
-            GameTableContextMenu contextMenu = new GameTableContextMenu(_tableStore, treeIter, _virtualFileSystem);
+            BlitStruct<ApplicationControlProperty> controlData = (BlitStruct<ApplicationControlProperty>)_tableStore.GetValue(treeIter, 10);
+
+            GameTableContextMenu contextMenu = new GameTableContextMenu(_tableStore, controlData, treeIter, _virtualFileSystem);
             contextMenu.ShowAll();
             contextMenu.PopupAtPointer(null);
         }
@@ -926,7 +948,7 @@ namespace Ryujinx.Ui
 
         private void Settings_Pressed(object sender, EventArgs args)
         {
-            SwitchSettings settingsWin = new SwitchSettings();
+            SwitchSettings settingsWin = new SwitchSettings(_virtualFileSystem, _contentManager);
             settingsWin.Show();
         }
 

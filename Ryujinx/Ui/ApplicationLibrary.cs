@@ -1,12 +1,15 @@
 using JsonPrettyPrinterPlus;
 using LibHac;
+using LibHac.Common;
 using LibHac.Fs;
 using LibHac.Fs.Shim;
 using LibHac.FsSystem;
 using LibHac.FsSystem.NcaUtils;
 using LibHac.Ncm;
+using LibHac.Ns;
 using LibHac.Spl;
 using Ryujinx.Common.Logging;
+using Ryujinx.Common.Configuration;
 using Ryujinx.Configuration.System;
 using Ryujinx.HLE.FileSystem;
 using Ryujinx.HLE.Loaders.Npdm;
@@ -39,6 +42,53 @@ namespace Ryujinx.Ui
         private static Language          _desiredTitleLanguage;
         private static bool              _loadingError;
 
+        public static IEnumerable<string> GetFilesInDirectory(string directory)
+        {
+            Stack<string> stack = new Stack<string>();
+            stack.Push(directory);
+            while (stack.Count > 0)
+            {
+                string dir = stack.Pop();
+                string[] content = { };
+
+                try
+                {
+                    content = Directory.GetFiles(dir, "*");
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    Logger.PrintWarning(LogClass.Application, $"Failed to get access to directory: \"{dir}\"");
+                }
+
+                if (content.Length > 0)
+                {
+                    foreach (string file in content)
+                        yield return file;
+                }
+
+                try
+                {
+                    content = Directory.GetDirectories(dir);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    Logger.PrintWarning(LogClass.Application, $"Failed to get access to directory: \"{dir}\"");
+                }
+
+                if (content.Length > 0)
+                {
+                    foreach (string subdir in content)
+                        stack.Push(subdir);
+                }
+            }
+        }
+
+        public static void ReadControlData(IFileSystem controlFs, Span<byte> outProperty)
+        {
+            controlFs.OpenFile(out IFile controlFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            controlFile.Read(out long _, 0, outProperty, ReadOption.None).ThrowIfFailure();
+        }
+
         public static void LoadApplications(List<string> appDirs, VirtualFileSystem virtualFileSystem, Language desiredTitleLanguage)
         {
             int numApplicationsFound  = 0;
@@ -52,6 +102,7 @@ namespace Ryujinx.Ui
             List<string> applications = new List<string>();
             foreach (string appDir in appDirs)
             {
+                
                 if (!Directory.Exists(appDir))
                 {
                     Logger.PrintWarning(LogClass.Application, $"The \"game_dirs\" section in \"Config.json\" contains an invalid directory: \"{appDir}\"");
@@ -59,10 +110,10 @@ namespace Ryujinx.Ui
                     continue;
                 }
 
-                foreach (string app in Directory.GetFiles(appDir, "*.*", SearchOption.AllDirectories))
+                foreach (string app in GetFilesInDirectory(appDir))
                 {
                     if ((Path.GetExtension(app).ToLower() == ".nsp") ||
-                        (Path.GetExtension(app).ToLower() == ".pfs0")||
+                        (Path.GetExtension(app).ToLower() == ".pfs0") ||
                         (Path.GetExtension(app).ToLower() == ".xci") ||
                         (Path.GetExtension(app).ToLower() == ".nca") ||
                         (Path.GetExtension(app).ToLower() == ".nro") ||
@@ -84,6 +135,7 @@ namespace Ryujinx.Ui
                 string version         = "0";
                 string saveDataPath    = null;
                 byte[] applicationIcon = null;
+                BlitStruct<ApplicationControlProperty> controlHolder = new BlitStruct<ApplicationControlProperty>(1);
 
                 try
                 {
@@ -116,7 +168,7 @@ namespace Ryujinx.Ui
                                     {
                                         if (Path.GetExtension(fileEntry.FullPath).ToLower() == ".nca")
                                         {
-                                            pfs.OpenFile(out IFile ncaFile, fileEntry.FullPath, OpenMode.Read).ThrowIfFailure();
+                                            pfs.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                             Nca nca       = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
                                             int dataIndex = Nca.GetSectionIndexFromType(NcaSectionType.Data, NcaContentType.Program);
@@ -146,7 +198,7 @@ namespace Ryujinx.Ui
                                 {
                                     applicationIcon = _nspIcon;
 
-                                    Result result = pfs.OpenFile(out IFile npdmFile, "/main.npdm", OpenMode.Read);
+                                    Result result = pfs.OpenFile(out IFile npdmFile, "/main.npdm".ToU8Span(), OpenMode.Read);
 
                                     if (ResultFs.PathNotFound.Includes(result))
                                     {
@@ -161,20 +213,22 @@ namespace Ryujinx.Ui
                                     // Store the ControlFS in variable called controlFs
                                     GetControlFsAndTitleId(pfs, out IFileSystem controlFs, out titleId);
 
+                                    ReadControlData(controlFs, controlHolder.ByteSpan);
+
                                     // Creates NACP class from the NACP file
-                                    controlFs.OpenFile(out IFile controlNacpFile, "/control.nacp", OpenMode.Read).ThrowIfFailure();
+                                    controlFs.OpenFile(out IFile controlNacpFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                     Nacp controlData = new Nacp(controlNacpFile.AsStream());
 
                                     // Get the title name, title ID, developer name and version number from the NACP
-                                    version = controlData.DisplayVersion;
+                                    version = IsUpdateApplied(titleId, out string updateVersion) ? updateVersion : controlData.DisplayVersion;
 
                                     GetNameIdDeveloper(controlData, out titleName, out _, out developer);
 
                                     // Read the icon from the ControlFS and store it as a byte array
                                     try
                                     {
-                                        controlFs.OpenFile(out IFile icon, $"/icon_{_desiredTitleLanguage}.dat", OpenMode.Read).ThrowIfFailure();
+                                        controlFs.OpenFile(out IFile icon, $"/icon_{_desiredTitleLanguage}.dat".ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                         using (MemoryStream stream = new MemoryStream())
                                         {
@@ -191,7 +245,7 @@ namespace Ryujinx.Ui
                                                 continue;
                                             }
 
-                                            controlFs.OpenFile(out IFile icon, entry.FullPath, OpenMode.Read).ThrowIfFailure();
+                                            controlFs.OpenFile(out IFile icon, entry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                             using (MemoryStream stream = new MemoryStream())
                                             {
@@ -353,11 +407,11 @@ namespace Ryujinx.Ui
 
                     if (result.IsSuccess())
                     {
-                        saveDataPath = Path.Combine(virtualFileSystem.GetNandPath(), $"user/save/{saveDataInfo.SaveDataId:x16}");
+                        saveDataPath = Path.Combine(virtualFileSystem.GetNandPath(), "user", "save", saveDataInfo.SaveDataId.ToString("x16"));
                     }
                 }
 
-                ApplicationData data = new ApplicationData()
+                ApplicationData data = new ApplicationData
                 {
                     Favorite      = appMetadata.Favorite,
                     Icon          = applicationIcon,
@@ -370,7 +424,8 @@ namespace Ryujinx.Ui
                     FileExtension = Path.GetExtension(applicationPath).ToUpper().Remove(0 ,1),
                     FileSize      = (fileSize < 1) ? (fileSize * 1024).ToString("0.##") + "MB" : fileSize.ToString("0.##") + "GB",
                     Path          = applicationPath,
-                    SaveDataPath  = saveDataPath
+                    SaveDataPath  = saveDataPath,
+                    ControlHolder = controlHolder
                 };
 
                 numApplicationsLoaded++;
@@ -429,7 +484,7 @@ namespace Ryujinx.Ui
             // Add keys to key set if needed
             foreach (DirectoryEntryEx ticketEntry in pfs.EnumerateEntries("/", "*.tik"))
             {
-                Result result = pfs.OpenFile(out IFile ticketFile, ticketEntry.FullPath, OpenMode.Read);
+                Result result = pfs.OpenFile(out IFile ticketFile, ticketEntry.FullPath.ToU8Span(), OpenMode.Read);
 
                 if (result.IsSuccess())
                 {
@@ -442,7 +497,7 @@ namespace Ryujinx.Ui
             // Find the Control NCA and store it in variable called controlNca
             foreach (DirectoryEntryEx fileEntry in pfs.EnumerateEntries("/", "*.nca"))
             {
-                pfs.OpenFile(out IFile ncaFile, fileEntry.FullPath, OpenMode.Read).ThrowIfFailure();
+                pfs.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                 Nca nca = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
 
@@ -567,6 +622,48 @@ namespace Ryujinx.Ui
             else
             {
                 titleId = "0000000000000000";
+            }
+        }
+
+        private static bool IsUpdateApplied(string titleId, out string version)
+        {
+            try
+            {
+                using (Stream stream = File.OpenRead(Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "updates.json")))
+                {
+                    IJsonFormatterResolver resolver = CompositeResolver.Create(StandardResolver.AllowPrivateSnakeCase);
+
+                    string updatePath = JsonSerializer.Deserialize<TitleUpdateMetadata>(stream, resolver).Selected;
+
+                    using (FileStream file = new FileStream(updatePath, FileMode.Open, FileAccess.Read))
+                    {
+                        PartitionFileSystem nsp = new PartitionFileSystem(file.AsStorage());
+
+                        foreach (DirectoryEntryEx fileEntry in nsp.EnumerateEntries("/", "*.nca"))
+                        {
+                            nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+
+                            Nca nca = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
+
+                            if (nca.Header.ContentType == NcaContentType.Control)
+                            {
+                                nca.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None).OpenFile(out IFile nacpFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                                Nacp controlData = new Nacp(nacpFile.AsStream());
+
+                                version = controlData.DisplayVersion;
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                version = "";
+                return false;
+            }
+            catch
+            {
+                version = "";
+                return false;
             }
         }
     }
